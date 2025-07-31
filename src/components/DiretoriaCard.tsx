@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Edit, Save, X, Mail, Plus, Trash2, Loader } from 'lucide-react';
+import { useApi } from '../utils/api';
 
 interface MembroDiretoria {
   id: string;
@@ -10,6 +11,7 @@ interface MembroDiretoria {
 }
 
 const DiretoriaCard: React.FC = () => {
+  const api = useApi();
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -18,7 +20,7 @@ const DiretoriaCard: React.FC = () => {
   const [userIgrejaTipo, setUserIgrejaTipo] = useState<string>('');
 
   // Buscar dados da diretoria da igreja
-  const fetchDiretoriaData = async () => {
+  const fetchDiretoriaData = useCallback(async () => {
     try {
       const user = JSON.parse(localStorage.getItem('user') || '{}');
       const token = localStorage.getItem('token');
@@ -29,11 +31,7 @@ const DiretoriaCard: React.FC = () => {
       }
 
       // Buscar informações da igreja para verificar o tipo
-      const igrejaResponse = await fetch(`http://localhost:3005/igrejas/${user.igreja}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const igrejaResponse = await api.get(`/igrejas/${user.igreja}`);
 
       if (igrejaResponse.ok) {
         const igrejaData = await igrejaResponse.json();
@@ -42,11 +40,7 @@ const DiretoriaCard: React.FC = () => {
         console.log('Erro ao buscar dados da igreja:', igrejaResponse.status);
       }
 
-      const response = await fetch(`http://localhost:3005/diretoria/${user.igreja}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+              const response = await api.get(`/diretoria/${user.igreja}`);
 
       if (response.ok) {
         const data = await response.json();
@@ -61,11 +55,11 @@ const DiretoriaCard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [api]);
 
   useEffect(() => {
     fetchDiretoriaData();
-  }, []);
+  }, [fetchDiretoriaData]);
 
   const handleSave = async () => {
     try {
@@ -84,12 +78,10 @@ const DiretoriaCard: React.FC = () => {
       formData.append('membros', JSON.stringify(membros));
       formData.append('igreja', user.igreja);
 
-      const response = await fetch('http://localhost:3005/diretoria', {
+      const response = await api.request('/diretoria', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        },
-        body: formData
+        body: formData,
+        headers: {} // Remove Content-Type header for FormData
       });
 
       if (response.ok) {

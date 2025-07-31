@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { 
@@ -18,6 +18,7 @@ import {
   Mail,
   Phone
 } from 'lucide-react';
+import { useApi } from '../utils/api';
 
 interface Igreja {
   _id: string;
@@ -61,6 +62,7 @@ interface Diretoria {
 
 const Churches: React.FC = () => {
   const navigate = useNavigate();
+  const api = useApi();
   const [igrejas, setIgrejas] = useState<Igreja[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -84,34 +86,9 @@ const Churches: React.FC = () => {
   const [diretoria, setDiretoria] = useState<Diretoria[]>([]);
   const [loadingPastores, setLoadingPastores] = useState(false);
 
-  useEffect(() => {
-    const userData = localStorage.getItem('user');
-    if (userData) {
-      setUser(JSON.parse(userData));
-    }
-    fetchIgrejas();
-  }, []);
-
-  // Redirecionar congregação
-  useEffect(() => {
-    if (user?.role === 'congregacao') {
-      navigate('/dashboard');
-    }
-  }, [user, navigate]);
-
-  const fetchIgrejas = async () => {
+  const fetchIgrejas = useCallback(async () => {
     try {
-      const token = localStorage.getItem('token');
-      if (!token) {
-        navigate('/login');
-        return;
-      }
-
-      const response = await fetch('http://localhost:3005/igrejas', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const response = await api.get('/igrejas');
 
       if (response.ok) {
         const data = await response.json();
@@ -124,7 +101,22 @@ const Churches: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [api]);
+
+  useEffect(() => {
+    const userData = localStorage.getItem('user');
+    if (userData) {
+      setUser(JSON.parse(userData));
+    }
+    fetchIgrejas();
+  }, [fetchIgrejas]);
+
+  // Redirecionar congregação
+  useEffect(() => {
+    if (user?.role === 'congregacao') {
+      navigate('/dashboard');
+    }
+  }, [user, navigate]);
 
   const handleCreateIgreja = async () => {
     if (!formData.nome.trim() || !formData.endereco.trim()) {
@@ -141,20 +133,12 @@ const Churches: React.FC = () => {
     setSubmitting(true);
     setFormError('');
     try {
-      const token = localStorage.getItem('token');
       const igrejaData = {
         ...formData,
         sede: user?.role === 'sede' ? user.igreja : (showCongregacoes && selectedMatriz ? selectedMatriz._id : undefined),
         usuario: (user?.role === 'admin' || user?.role === 'sede') ? userFields : undefined
       };
-      const response = await fetch('http://localhost:3005/igrejas', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(igrejaData)
-      });
+      const response = await api.post('/igrejas', igrejaData);
       if (response.ok) {
         const novaIgreja = await response.json();
         setIgrejas([...igrejas, novaIgreja]);
@@ -179,13 +163,7 @@ const Churches: React.FC = () => {
   const handleDeleteIgreja = async (id: string) => {
     if (!window.confirm('Tem certeza que deseja excluir esta igreja?')) return;
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch(`http://localhost:3005/igrejas/${id}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const response = await api.delete(`/igrejas/${id}`);
       if (response.ok) {
         setIgrejas(igrejas.filter(i => i._id !== id));
       } else {
@@ -210,10 +188,7 @@ const Churches: React.FC = () => {
 
   // Função removida - não é mais necessária
 
-  const handleViewMatrizCongregacoes = (matriz: Igreja) => {
-    setSelectedMatriz(matriz);
-    setShowCongregacoes(true);
-  };
+
 
   const handleBackToMatrizes = () => {
     setSelectedMatriz(null);
@@ -236,11 +211,7 @@ const Churches: React.FC = () => {
       let pastoresData = [];
       if (igreja.tipo === 'congregacao') {
         // Para congregação, buscar dados duplos (matriz e congregação)
-        const pastoresResponse = await fetch(`http://localhost:3005/pastor/duplo/${igreja._id}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
+        const pastoresResponse = await api.get(`/pastor/duplo/${igreja._id}`);
 
         if (pastoresResponse.ok) {
           const data = await pastoresResponse.json();
@@ -261,11 +232,7 @@ const Churches: React.FC = () => {
         }
       } else {
         // Para sede, buscar pastor normal
-        const pastoresResponse = await fetch(`http://localhost:3005/pastor/${igreja._id}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
+        const pastoresResponse = await api.get(`/pastor/${igreja._id}`);
 
         if (pastoresResponse.ok) {
           const data = await pastoresResponse.json();
@@ -279,11 +246,7 @@ const Churches: React.FC = () => {
       }
 
       // Buscar diretoria da igreja (usando a mesma lógica do DiretoriaCard)
-      const diretoriaResponse = await fetch(`http://localhost:3005/diretoria/${igreja._id}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
+      const diretoriaResponse = await api.get(`/diretoria/${igreja._id}`);
 
       if (diretoriaResponse.ok) {
         const data = await diretoriaResponse.json();
@@ -310,15 +273,7 @@ const Churches: React.FC = () => {
     setFormError('');
     setSubmitting(true);
     try {
-      const token = localStorage.getItem('token');
-      const response = await fetch(`http://localhost:3005/igrejas/${editIgrejaId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify(formData)
-      });
+      const response = await api.put(`/igrejas/${editIgrejaId}`, formData);
       if (response.ok) {
         const updated = await response.json();
         setIgrejas(igrejas.map(i => i._id === editIgrejaId ? updated : i));
@@ -386,7 +341,7 @@ const Churches: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-white dark:bg-gray-900">
+    <div className="min-h-screen">
       {/* Header */}
       <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">

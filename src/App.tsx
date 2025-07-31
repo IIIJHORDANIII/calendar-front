@@ -1,6 +1,7 @@
 import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { ThemeProvider } from './contexts/ThemeContext';
+import { NotificationProvider } from './contexts/NotificationContext';
 import Header from './components/Header';
 import Hero from './components/Hero';
 import Features from './components/Features';
@@ -14,12 +15,15 @@ import Tithes from './pages/Tithes';
 import Documentation from './pages/Documentation';
 import ProtectedRoute from './components/ProtectedRoute';
 import Members from './pages/Members';
+import NotificationHistory from './pages/NotificationHistory';
+import AuditLogs from './pages/AuditLogs';
 
 function App() {
   return (
     <ThemeProvider>
-      <Router>
-        <div className="App">
+      <NotificationProvider>
+        <Router>
+          <div className="App">
           <Routes>
           {/* Landing Page */}
           <Route path="/" element={
@@ -60,9 +64,20 @@ function App() {
             </ProtectedRoute>
           } />
           <Route path="/members" element={<Members />} />
-        </Routes>
-      </div>
-    </Router>
+          <Route path="/notifications" element={
+            <ProtectedRoute>
+              <NotificationHistory />
+            </ProtectedRoute>
+          } />
+          <Route path="/audit" element={
+            <ProtectedRoute>
+              <AuditLogs />
+            </ProtectedRoute>
+          } />
+                  </Routes>
+          </div>
+        </Router>
+      </NotificationProvider>
     </ThemeProvider>
   );
 }

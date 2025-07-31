@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useNotifications } from '../contexts/NotificationContext';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useIntelligentCache, CacheTTL } from '../utils/cache';
 import { useNavigate } from 'react-router-dom';
 import { 
   Users, 
@@ -19,22 +21,31 @@ import {
   X,
   CheckCircle,
   AlertCircle,
-  Clock,
+
   Trash2,
   Download,
   Menu,
   Home,
   Users as UsersIcon,
-  Building
+
+  BarChart3
 } from 'lucide-react';
 import PastorCard from '../components/PastorCard';
 import DiretoriaCard from '../components/DiretoriaCard';
 import ThemeToggle from '../components/ThemeToggle';
+import DashboardCharts from '../components/DashboardCharts';
+import InsightsPanel from '../components/InsightsPanel';
+import ReportsPanel from '../components/ReportsPanel';
+import PushNotificationSettings from '../components/PushNotificationSettings';
 import { useApi } from '../utils/api';
+import { useCustomTheme } from '../hooks/useCustomTheme';
+import { offlineManager } from '../utils/offlineManager';
+import DashboardSelector from '../components/PersonalizedDashboard/DashboardSelector';
+import ThemeCustomizer from '../components/ThemeCustomizer';
 import jsPDF from 'jspdf';
 import 'jspdf-autotable';
 
-interface User {
+interface DashboardUser {
   _id: string;
   nome: string;
   email: string;
@@ -47,6 +58,7 @@ interface Igreja {
   nome: string;
   tipo: string;
   endereco: string;
+  sede?: string | { _id: string; nome: string };
 }
 
 interface Calendario {
@@ -77,7 +89,7 @@ interface Notificacao {
   titulo: string;
   descricao: string;
   igreja: Igreja;
-  usuario: User;
+  usuario: DashboardUser;
   itemId: string;
   itemTipo: string;
   lida: boolean;
@@ -96,13 +108,18 @@ interface DashboardData {
   totalSede: number;
   totalCongregacoes: number;
   totalGeral: number;
+  sedes: { igreja: Igreja; total: number; items: Dizimo[] }[];
   congregacoes: { igreja: Igreja; total: number; items: Dizimo[] }[];
+  membros: any[];
 }
 
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
   const api = useApi();
-  const [user, setUser] = useState<User | null>(null);
+  const { notifications, unreadCount, markAsRead, removeNotification, markAllAsRead, addNotification } = useNotifications();
+  const { getCached, setCached, invalidatePattern } = useIntelligentCache();
+  const [user, setUser] = useState<DashboardUser | null>(null);
+  const { theme } = useCustomTheme(user?.igreja);
   const [loading, setLoading] = useState(true);
   const [dashboardData, setDashboardData] = useState<DashboardData>({
     totalIgrejas: 0,
@@ -115,58 +132,52 @@ const Dashboard: React.FC = () => {
     totalSede: 0,
     totalCongregacoes: 0,
     totalGeral: 0,
-    congregacoes: []
+    sedes: [],
+    congregacoes: [],
+    membros: []
   });
   const [refreshing, setRefreshing] = useState(false);
   const [showDizimos, setShowDizimos] = useState(false);
-  const [showCongregacoes, setShowCongregacoes] = useState(false);
+  const [showThemeCustomizer, setShowThemeCustomizer] = useState(false);
+  const [usePersonalizedDashboard, setUsePersonalizedDashboard] = useState(true);
+
+  const [sedeExpandida, setSedeExpandida] = useState<string | null>(null);
+  const [sedeEventosExpandida, setSedeEventosExpandida] = useState<string | null>(null);
   const [showAtividades, setShowAtividades] = useState(true);
   const [showRelatorioDizimistas, setShowRelatorioDizimistas] = useState(false);
   const [relatorioDizimistas, setRelatorioDizimistas] = useState<any[]>([]);
   const [loadingRelatorio, setLoadingRelatorio] = useState(false);
-  const [isDizimoCardClicked, setIsDizimoCardClicked] = useState(false);
+  const [sedeComAnimacao, setSedeComAnimacao] = useState<string | null>(null);
   const [isStatsCardClicked, setIsStatsCardClicked] = useState(false);
   
   // Mobile menu states
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [currentMobileView, setCurrentMobileView] = useState<'dashboard' | 'pastor' | 'diretoria'>('dashboard');
   
-  // Notification states
-  const [notificacoes, setNotificacoes] = useState<Notificacao[]>([]);
-  const [notificacoesNaoLidas, setNotificacoesNaoLidas] = useState(0);
+  // Notification states - usando o NotificationContext
   const [showNotificacoes, setShowNotificacoes] = useState(false);
-  const [loadingNotificacoes, setLoadingNotificacoes] = useState(false);
 
-  useEffect(() => {
-    const userData = localStorage.getItem('user');
-    if (userData) {
-      setUser(JSON.parse(userData));
-    }
-    fetchDashboardData();
-  }, []);
 
-  useEffect(() => {
-    if (user?.role === 'admin' || user?.role === 'sede') {
-      fetchNotificacoes();
-      fetchNotificacoesNaoLidas();
-    }
-  }, [user?.role]);
+  // Charts state
+  const [showCharts, setShowCharts] = useState(false);
 
-  // Close notifications when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as Element;
-      if (showNotificacoes && !target.closest('.notification-dropdown')) {
-        setShowNotificacoes(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showNotificacoes]);
-
-  const fetchDashboardData = async () => {
+  const fetchDashboardData = useCallback(async (forceRefresh = false) => {
     try {
+      const cacheKey = `dashboard_data_${user?._id || 'anonymous'}`;
+      
+      // Verificar cache primeiro, se não for refresh forçado
+      if (!forceRefresh) {
+        const cachedData = getCached<DashboardData>(cacheKey);
+        if (cachedData) {
+          console.log('📦 Dados carregados do cache');
+          setDashboardData(cachedData);
+          setLoading(false);
+          return;
+        }
+      }
+
+      console.log('🌐 Buscando dados do servidor...');
+
       // Buscar dados das igrejas (filtrado por permissões)
       const igrejasResponse = await api.get('/igrejas');
       const igrejas = await igrejasResponse.ok ? await igrejasResponse.json() : [];
@@ -184,6 +195,11 @@ const Dashboard: React.FC = () => {
       const dizimosResponse = await api.get('/dizimo');
       const dizimos = await dizimosResponse.ok ? await dizimosResponse.json() : [];
       console.log('Dízimos recebidos do backend:', dizimos);
+
+      // Buscar membros (filtrado por permissões)
+      const membrosResponse = await api.get('/membro');
+      const membros = await membrosResponse.ok ? await membrosResponse.json() : [];
+      console.log('Membros recebidos do backend:', membros);
 
       // Filtrar eventos futuros (a partir de hoje)
       const hoje = new Date();
@@ -210,10 +226,10 @@ const Dashboard: React.FC = () => {
       });
       console.log('Dízimos por igreja:', dizimosPorIgreja);
 
-      // Separar sede e congregações
-      const sede = dizimosPorIgreja.find((d: any) => d.igreja.tipo === 'sede');
+      // Separar sedes e congregações
+      const sedes = dizimosPorIgreja.filter((d: any) => d.igreja.tipo === 'sede');
       const congregacoes = dizimosPorIgreja.filter((d: any) => d.igreja.tipo === 'congregacao');
-      const totalSede = sede ? sede.total : 0;
+      const totalSede = sedes.reduce((sum: number, s: any) => sum + s.total, 0);
       const totalCongregacoes = congregacoes.reduce((sum: number, c: any) => sum + c.total, 0);
       
       // Para congregações, o total geral é apenas o total da própria congregação
@@ -225,18 +241,8 @@ const Dashboard: React.FC = () => {
         totalGeral = totalSede + totalCongregacoes;
       }
 
-      // Criar atividades recentes simuladas
-      const atividadesRecentes = [
-        { type: 'church', message: `${igrejas.length} igrejas cadastradas no sistema`, time: 'Agora' },
-        { type: 'event', message: `${calendarios.length} eventos programados`, time: 'Agora' },
-        { type: 'user', message: `${usuarios.length} usuários ativos`, time: 'Agora' },
-        { type: 'dizimo', message: `R$ ${user?.role === 'congregacao' 
-          ? dizimos.filter((d: any) => d.igreja && String(d.igreja._id) === String(user.igreja))
-              .reduce((sum: number, d: any) => sum + (d.total || d.valorDizimos || d.valor || 0), 0).toFixed(2)
-          : dizimos.reduce((sum: number, d: any) => sum + (d.total || d.valorDizimos || d.valor || 0), 0).toFixed(2)} em dízimos`, time: 'Agora' }
-      ];
-
-      setDashboardData({
+      // Atividades recentes são definidas diretamente no setDashboardData
+      const dashboardDataResult: DashboardData = {
         totalIgrejas: igrejas.length,
         totalUsuarios: usuarios.length,
         totalEventos: calendarios.length,
@@ -258,120 +264,96 @@ const Dashboard: React.FC = () => {
         totalSede,
         totalCongregacoes,
         totalGeral,
-        congregacoes
-      });
+        sedes,
+        congregacoes,
+        membros
+      };
+
+      // Salvar no cache
+      setCached(cacheKey, dashboardDataResult, CacheTTL.DASHBOARD_DATA);
+      console.log('💾 Dados salvos no cache');
+
+      setDashboardData(dashboardDataResult);
 
     } catch (error) {
       console.error('Erro ao buscar dados:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [api, user]);
 
-  const fetchNotificacoes = async () => {
-    try {
-      const response = await api.get('/notificacao');
-      if (response.ok) {
-        const data = await response.json();
-        setNotificacoes(data);
-      }
-    } catch (error) {
-      console.error('Erro ao buscar notificações:', error);
-    }
-  };
 
-  const fetchNotificacoesNaoLidas = async () => {
-    try {
-      const response = await api.get('/notificacao/nao-lidas');
-      if (response.ok) {
-        const data = await response.json();
-        setNotificacoesNaoLidas(data.count);
-      }
-    } catch (error) {
-      console.error('Erro ao buscar notificações não lidas:', error);
-    }
-  };
 
-  const marcarComoLida = async (notificacaoId: string) => {
-    try {
-      const response = await api.put(`/notificacao/${notificacaoId}/ler`);
-      if (response.ok) {
-        // Update local state
-        setNotificacoes(prev => prev.map(n => 
-          n._id === notificacaoId ? { ...n, lida: true } : n
-        ));
-        setNotificacoesNaoLidas(prev => Math.max(0, prev - 1));
-      }
-    } catch (error) {
-      console.error('Erro ao marcar notificação como lida:', error);
+  useEffect(() => {
+    const userData = localStorage.getItem('user');
+    if (userData) {
+      setUser(JSON.parse(userData));
     }
-  };
+    fetchDashboardData();
+    
+    // Precarregar dados para modo offline
+    offlineManager.preloadEssentialData();
+  }, []); // Removido fetchDashboardData da dependência
 
-  const marcarTodasComoLidas = async () => {
-    try {
-      const response = await api.put('/notificacao/ler-todas');
-      if (response.ok) {
-        setNotificacoes(prev => prev.map(n => ({ ...n, lida: true })));
-        setNotificacoesNaoLidas(0);
-      }
-    } catch (error) {
-      console.error('Erro ao marcar todas como lidas:', error);
-    }
-  };
 
-  const deletarNotificacao = async (notificacaoId: string) => {
-    try {
-      const response = await api.delete(`/notificacao/${notificacaoId}`);
-      if (response.ok) {
-        setNotificacoes(prev => prev.filter(n => n._id !== notificacaoId));
-        // Update unread count if notification was unread
-        const notificacao = notificacoes.find(n => n._id === notificacaoId);
-        if (notificacao && !notificacao.lida) {
-          setNotificacoesNaoLidas(prev => Math.max(0, prev - 1));
-        }
+
+  // Close notifications when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as Element;
+      if (showNotificacoes && !target.closest('.notification-dropdown')) {
+        setShowNotificacoes(false);
       }
-    } catch (error) {
-      console.error('Erro ao deletar notificação:', error);
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showNotificacoes]);
+
+  // Auto-close notifications after 5 seconds
+  useEffect(() => {
+    if (showNotificacoes) {
+      const timer = setTimeout(() => {
+        setShowNotificacoes(false);
+      }, 5000); // 5 segundos
+
+      return () => clearTimeout(timer);
     }
-  };
+  }, [showNotificacoes]);
+
+
 
   const handleRefresh = async () => {
     setRefreshing(true);
     
     try {
-      // Fetch fresh data
-      const [igrejasResponse, usuariosResponse, calendarioResponse, dizimosResponse] = await Promise.all([
-        api.get('/igrejas'),
-        api.get('/auth/users'),
-        api.get('/evento'),
-        api.get('/dizimo')
-      ]);
-
-      const [igrejas, usuarios, calendarios, dizimos] = await Promise.all([
-        igrejasResponse.ok ? igrejasResponse.json() : [],
-        usuariosResponse.ok ? usuariosResponse.json() : [],
-        calendarioResponse.ok ? calendarioResponse.json() : [],
-        dizimosResponse.ok ? dizimosResponse.json() : []
-      ]);
-
-      // Check for changes by comparing with current data
-      const hasChanges = 
-        igrejas.length !== dashboardData.totalIgrejas ||
-        usuarios.length !== dashboardData.totalUsuarios ||
-        calendarios.length !== dashboardData.totalEventos ||
-        dizimos.length !== dashboardData.dizimosPorIgreja.reduce((sum, d) => sum + d.items.length, 0);
-
-      if (hasChanges) {
-        // If there are changes, reload the entire page
-        window.location.reload();
-      } else {
-        // If no changes, just refresh the data normally
-        await fetchDashboardData();
-      }
+      // Limpar cache antes de buscar dados novos
+      invalidatePattern(`dashboard_data_${user?._id || 'anonymous'}`);
+      console.log('🗑️ Cache invalidado');
+      
+      await fetchDashboardData(true); // Force refresh
+      
+      // Show success notification
+      addNotification({
+        type: 'success',
+        category: 'system',
+        title: 'Dados atualizados',
+        message: 'As informações do dashboard foram atualizadas com sucesso.',
+        autoRemove: true,
+        duration: 3000
+      });
     } catch (error) {
-      console.error('Erro ao verificar mudanças:', error);
-      // Fallback to normal refresh
-      await fetchDashboardData();
+      console.error('Erro ao atualizar dados:', error);
+      
+      // Show error notification
+      addNotification({
+        type: 'error',
+        category: 'system',
+        title: 'Erro ao atualizar',
+        message: 'Não foi possível atualizar os dados. Tente novamente.',
+        autoRemove: true,
+        duration: 5000
+      });
     } finally {
       setRefreshing(false);
     }
@@ -399,6 +381,9 @@ const Dashboard: React.FC = () => {
         break;
       case 'relatorio-dizimistas':
         fetchRelatorioDizimistas();
+        break;
+      case 'analytics':
+        setShowCharts(!showCharts);
         break;
     }
   };
@@ -829,9 +814,7 @@ const Dashboard: React.FC = () => {
     doc.save(fileName);
   };
 
-  const canCreateIgreja = () => {
-    return user?.role === 'admin' || user?.role === 'sede';
-  };
+
 
   const getActivityIcon = (type: string) => {
     switch (type) {
@@ -861,8 +844,8 @@ const Dashboard: React.FC = () => {
     return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
   };
 
-  const formatNotificationTime = (dateString: string) => {
-    const date = new Date(dateString);
+  const formatNotificationTime = (timestamp: string | Date) => {
+    const date = typeof timestamp === 'string' ? new Date(timestamp) : timestamp;
     const now = new Date();
     const diffInMinutes = Math.floor((now.getTime() - date.getTime()) / (1000 * 60));
     
@@ -872,28 +855,24 @@ const Dashboard: React.FC = () => {
     return date.toLocaleDateString('pt-BR');
   };
 
-  const getNotificationIcon = (tipo: string) => {
-    switch (tipo) {
-      case 'evento': return <Calendar className="w-4 h-4" />;
-      case 'dizimo': return <DollarSign className="w-4 h-4" />;
-      case 'igreja': return <Church className="w-4 h-4" />;
-      case 'usuario': return <Users className="w-4 h-4" />;
-      case 'calendario': return <Calendar className="w-4 h-4" />;
-      case 'pastor': return <User className="w-4 h-4" />;
-      case 'diretoria': return <Users className="w-4 h-4" />;
+  const getNotificationIcon = (category: string) => {
+    switch (category) {
+      case 'event': return <Calendar className="w-4 h-4" />;
+      case 'financial': return <DollarSign className="w-4 h-4" />;
+      case 'church': return <Church className="w-4 h-4" />;
+      case 'member': return <Users className="w-4 h-4" />;
+      case 'system': return <AlertCircle className="w-4 h-4" />;
       default: return <AlertCircle className="w-4 h-4" />;
     }
   };
 
-  const getNotificationColor = (tipo: string) => {
-    switch (tipo) {
-      case 'evento': return 'text-blue-400';
-      case 'dizimo': return 'text-green-400';
-      case 'igreja': return 'text-purple-400';
-      case 'usuario': return 'text-yellow-400';
-      case 'calendario': return 'text-indigo-400';
-      case 'pastor': return 'text-orange-400';
-      case 'diretoria': return 'text-pink-400';
+  const getNotificationColor = (category: string) => {
+    switch (category) {
+      case 'event': return 'text-blue-400';
+      case 'financial': return 'text-green-400';
+      case 'church': return 'text-purple-400';
+      case 'member': return 'text-yellow-400';
+      case 'system': return 'text-gray-400';
       default: return 'text-gray-400';
     }
   };
@@ -949,12 +928,12 @@ const Dashboard: React.FC = () => {
   // Mobile Navigation Component
   const MobileNavigation = () => (
     <motion.div
-      className="lg:hidden fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 z-40"
+      className="lg:hidden fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 z-40 pb-safe"
       initial={{ y: 100 }}
       animate={{ y: 0 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="flex justify-around py-2">
+      <div className="flex justify-around py-3">
         <button
           onClick={() => setCurrentMobileView('dashboard')}
           className={`flex flex-col items-center p-2 rounded-lg transition-colors ${
@@ -1007,7 +986,7 @@ const Dashboard: React.FC = () => {
       exit={{ opacity: 0, x: -100 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="p-4 pb-20">
+      <div className="p-4 pb-24">
         <div className="w-full flex justify-center">
           <PastorCard />
         </div>
@@ -1023,7 +1002,7 @@ const Dashboard: React.FC = () => {
       exit={{ opacity: 0, x: -100 }}
       transition={{ duration: 0.3 }}
     >
-      <div className="p-4 pb-20">
+      <div className="p-4 pb-24">
         <div className="w-full flex justify-center">
           <DiretoriaCard />
         </div>
@@ -1032,8 +1011,8 @@ const Dashboard: React.FC = () => {
   );
 
   return (
-    <div className="min-h-screen">
-      <div className="w-full lg:w-[85%] mx-auto flex flex-col h-screen px-4 sm:px-6 lg:px-8 xl:px-10">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+      <div className="w-full lg:w-[85%] mx-auto flex flex-col px-4 sm:px-6 lg:px-8 xl:px-10 pb-32 dashboard-container">
         {/* Header */}
         <header className="bg-transparent border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
           <div className="py-4">
@@ -1071,9 +1050,9 @@ const Dashboard: React.FC = () => {
                       title="Notificações"
                     >
                       <Bell className="w-5 h-5" />
-                      {notificacoesNaoLidas > 0 && (
+                      {unreadCount > 0 && (
                         <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                          {notificacoesNaoLidas > 9 ? '9+' : notificacoesNaoLidas}
+                          {unreadCount > 9 ? '9+' : unreadCount}
                         </span>
                       )}
                     </button>
@@ -1091,73 +1070,97 @@ const Dashboard: React.FC = () => {
                           <div className="p-4 border-b border-gray-200 dark:border-gray-700">
                             <div className="flex items-center justify-between">
                               <h3 className="text-gray-900 dark:text-white font-semibold">Notificações</h3>
-                              {notificacoesNaoLidas > 0 && (
-                                <button
-                                  onClick={marcarTodasComoLidas}
-                                  className="text-blue-400 hover:text-blue-300 text-sm"
-                                >
-                                  Marcar todas como lidas
-                                </button>
+                              {unreadCount > 0 && (
+                                <span className="text-blue-400 text-sm">
+                                  {unreadCount} não lidas
+                                </span>
                               )}
                             </div>
                           </div>
                           
                           <div className="p-2">
-                            {notificacoes.length > 0 ? (
-                              notificacoes.map((notificacao) => (
+                            {notifications.length > 0 ? (
+                              <>
+                                <div className="flex items-center justify-between p-2 border-b border-gray-200 dark:border-gray-600">
+                                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                                    {notifications.length} notificação{notifications.length !== 1 ? 'ões' : ''}
+                                  </span>
+                                  {unreadCount > 0 && (
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        console.log('Marcando todas como lidas');
+                                        markAllAsRead();
+                                      }}
+                                      className="text-xs text-blue-500 hover:text-blue-600 transition-colors"
+                                    >
+                                      Marcar todas como lidas
+                                    </button>
+                                  )}
+                                </div>
+                                {notifications.slice(0, 5).map((notificacao) => (
                                 <motion.div
-                                  key={notificacao._id}
+                                  key={notificacao.id}
                                   className={`p-3 rounded-lg mb-2 transition-colors ${
-                                    notificacao.lida ? 'bg-gray-100 dark:bg-gray-700/50' : 'bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20'
+                                    notificacao.read ? 'bg-gray-100 dark:bg-gray-700/50' : 'bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20'
                                   }`}
                                   initial={{ opacity: 0, x: -10 }}
                                   animate={{ opacity: 1, x: 0 }}
                                 >
                                   <div className="flex items-start justify-between">
                                     <div className="flex items-start space-x-3 flex-1">
-                                      <div className={`p-2 rounded-lg bg-gray-200 dark:bg-gray-600 ${getNotificationColor(notificacao.tipo)}`}>
-                                        {getNotificationIcon(notificacao.tipo)}
+                                      <div className={`p-2 rounded-lg bg-gray-200 dark:bg-gray-600 ${getNotificationColor(notificacao.category)}`}>
+                                        {getNotificationIcon(notificacao.category)}
                                       </div>
                                       <div className="flex-1 min-w-0">
-                                        <p className={`text-sm font-medium ${notificacao.lida ? 'text-gray-600 dark:text-gray-300' : 'text-gray-900 dark:text-white'}`}>
-                                          {notificacao.titulo}
+                                        <p className={`text-sm font-medium ${notificacao.read ? 'text-gray-600 dark:text-gray-300' : 'text-gray-900 dark:text-white'}`}>
+                                          {notificacao.title}
                                         </p>
                                         <p className="text-gray-600 dark:text-gray-400 text-xs mt-1">
-                                          {notificacao.descricao}
+                                          {notificacao.message}
                                         </p>
                                         <div className="flex items-center space-x-2 mt-2">
                                           <span className="text-gray-500 text-xs">
-                                            {notificacao.igreja?.nome || 'Sistema'}
+                                            {notificacao.churchName || 'Sistema'}
                                           </span>
                                           <span className="text-gray-500 text-xs">•</span>
                                           <span className="text-gray-500 text-xs">
-                                            {formatNotificationTime(notificacao.createdAt)}
+                                            {formatNotificationTime(notificacao.timestamp instanceof Date ? notificacao.timestamp : new Date(notificacao.timestamp))}
                                           </span>
                                         </div>
                                       </div>
                                     </div>
                                     
-                                    <div className="flex items-center space-x-1">
-                                      {!notificacao.lida && (
+                                    <div className="flex items-center space-x-1 ml-2">
+                                      {!notificacao.read && (
                                         <button
-                                          onClick={() => marcarComoLida(notificacao._id)}
-                                          className="text-gray-400 hover:text-green-400 transition-colors p-1"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            console.log('Marcando como lida:', notificacao.id);
+                                            markAsRead(notificacao.id);
+                                          }}
+                                          className="text-gray-400 hover:text-green-400 transition-colors p-1 rounded hover:bg-green-50 dark:hover:bg-green-900/20"
                                           title="Marcar como lida"
                                         >
-                                          <CheckCircle className="w-3 h-3" />
-              </button>
+                                          <CheckCircle className="w-4 h-4" />
+                                        </button>
                                       )}
                                       <button
-                                        onClick={() => deletarNotificacao(notificacao._id)}
-                                        className="text-gray-400 hover:text-red-400 transition-colors p-1"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          console.log('Removendo notificação:', notificacao.id);
+                                          removeNotification(notificacao.id);
+                                        }}
+                                        className="text-gray-400 hover:text-red-400 transition-colors p-1 rounded hover:bg-red-50 dark:hover:bg-red-900/20"
                                         title="Deletar"
                                       >
-                                        <Trash2 className="w-3 h-3" />
-              </button>
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
                                     </div>
                                   </div>
                                 </motion.div>
-                              ))
+                                ))}
+                              </>
                             ) : (
                               <div className="text-center py-8">
                                 <Bell className="w-8 h-8 text-gray-500 mx-auto mb-2" />
@@ -1195,15 +1198,19 @@ const Dashboard: React.FC = () => {
         </AnimatePresence>
 
         {/* Desktop Dashboard View */}
-        <div className={`flex flex-col lg:flex-row justify-between gap-8 pt-8 flex-1 items-center ${currentMobileView !== 'dashboard' ? 'hidden lg:flex' : ''}`}>
+        <div className={`flex ${user?.role === 'admin' ? 'flex-col' : 'flex-col lg:flex-row 2xl:flex-row'} gap-8 pt-8 pb-16 ${currentMobileView !== 'dashboard' ? 'hidden lg:flex' : ''}`}>
           {/* Cards laterais - Apenas para usuários não-admin e desktop */}
           {user?.role !== 'admin' && (
-            <div className="hidden lg:flex flex-col justify-center items-center flex-shrink-0 mb-8 lg:mb-0 w-full lg:w-64 lg:h-auto">
+            <div className="hidden lg:flex flex-col justify-start items-center flex-shrink-0 w-full lg:w-64 xl:w-72 2xl:w-56 space-y-6">
               <PastorCard />
+              {/* DiretoriaCard empilhado abaixo para telas lg-xl */}
+              <div className="2xl:hidden w-full mb-8">
+                <DiretoriaCard />
+              </div>
             </div>
           )}
           
-          <div className={`flex-1 min-w-0 flex flex-col ${user?.role === 'admin' ? 'w-full' : ''}`}>
+          <div className="w-full min-w-0 flex flex-col">{/* Conteúdo principal */}
             {/* Page Header */}
             <motion.div
               className="mb-8"
@@ -1222,17 +1229,100 @@ const Dashboard: React.FC = () => {
               </p>
             </motion.div>
 
-            {/* Stats Cards */}
+            {/* Quick Actions */}
             <motion.div
-              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8"
+              className="mb-8 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg"
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.6, delay: 0.1 }}
             >
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-6">Ações Rápidas</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    {/* Só mostra as ações de membro e dízimo se não for admin */}
+                    {[
+                      { title: 'Gerenciar Igrejas', icon: Church, color: 'from-blue-500 to-blue-700', action: 'igreja', show: user?.role === 'admin' || user?.role === 'sede' },
+                      { title: 'Criar Evento', icon: Calendar, color: 'from-green-500 to-green-700', action: 'evento', show: true },
+                      { title: 'Registrar Dízimo', icon: DollarSign, color: 'from-yellow-500 to-yellow-700', action: 'dizimo', show: user?.role !== 'admin' },
+                      { title: 'Adicionar Membro', icon: Users, color: 'from-purple-500 to-purple-700', action: 'membro', show: user?.role !== 'admin' },
+                      { title: 'Relatório Dizimistas', icon: FileText, color: 'from-orange-500 to-orange-700', action: 'relatorio-dizimistas', show: user?.role === 'admin' || user?.role === 'sede' },
+                      { title: showCharts ? 'Ocultar Analytics' : 'Ver Analytics', icon: BarChart3, color: 'from-indigo-500 to-indigo-700', action: 'analytics', show: true }
+                    ].filter(a => a.show).map((action, index) => (
+                  <motion.button
+                    key={action.title}
+                    onClick={() => handleQuickAction(action.action)}
+                    className={`bg-gradient-to-r ${action.color} text-white p-4 rounded-lg hover:scale-105 transition-all duration-300 flex flex-col items-center space-y-2`}
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ duration: 0.6, delay: 0.2 + index * 0.1 }}
+                    whileHover={{ y: -5 }}
+                  >
+                    <action.icon className="w-6 h-6" />
+                    <span className="text-sm font-medium">{action.title}</span>
+                  </motion.button>
+                ))}
+              </div>
+            </motion.div>
+
+            {/* Dashboard Analytics */}
+            <AnimatePresence>
+              {showCharts && (
+                <motion.div
+                  initial={{ opacity: 0, y: 30, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: -20, scale: 0.95 }}
+                  transition={{ 
+                    duration: 0.5,
+                    delay: 0.2,
+                    ease: "easeOut"
+                  }}
+                  className="mb-8"
+                >
+                  <DashboardCharts
+                    dizimos={dashboardData.dizimosPorIgreja.reduce((acc: any[], igreja) => [...acc, ...igreja.items], [])}
+                    eventos={dashboardData.eventosProximos}
+                    igrejas={dashboardData.dizimosPorIgreja.map(d => d.igreja)}
+                    membros={dashboardData.membros}
+                    userRole={user?.role || ''}
+                    sedes={dashboardData.sedes}
+                    congregacoes={dashboardData.congregacoes}
+                    user={user}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Insights e Relatórios */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.5 }}
+              className="grid grid-cols-1 xl:grid-cols-2 gap-6 mb-8"
+            >
+              <InsightsPanel dashboardData={dashboardData} />
+              <ReportsPanel dashboardData={dashboardData} />
+            </motion.div>
+
+            {/* Configurações de Notificações Push */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.6 }}
+              className="mb-16"
+            >
+              <PushNotificationSettings />
+            </motion.div>
+
+            {/* Stats Cards */}
+            <motion.div
+              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-6 mb-16"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+            >
               {stats.map((stat, index) => (
                 <motion.div
                   key={stat.title}
-                  className={`bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg relative overflow-hidden ${
+                  className={`bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-4 sm:p-6 shadow-lg relative overflow-hidden ${
                     stat.clickable ? 'cursor-pointer' : ''
                   }`}
                   initial={{ opacity: 0, y: 20 }}
@@ -1243,7 +1333,7 @@ const Dashboard: React.FC = () => {
                   }}
                   transition={{ 
                     duration: 0.6, 
-                    delay: 0.1 + index * 0.1,
+                    delay: 0.5 + index * 0.1,
                     scale: { duration: 0.2 }
                   }}
                   whileHover={{ y: -5, scale: 1.02 }}
@@ -1267,31 +1357,33 @@ const Dashboard: React.FC = () => {
                   )}
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-gray-600 dark:text-gray-400 text-sm">{stat.title}</p>
-                      <p className="text-2xl font-bold text-gray-900 dark:text-white mt-1">{stat.value}</p>
+                      <p className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm">{stat.title}</p>
+                      <p className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white mt-1">{stat.value}</p>
                     </div>
                     <motion.div 
-                      className={`p-3 rounded-lg bg-gradient-to-br from-blue-500 to-blue-700`}
+                      className={`p-2 sm:p-3 rounded-lg bg-gradient-to-br from-blue-500 to-blue-700`}
                       animate={stat.clickable && isStatsCardClicked && stat.title === 'Dízimos (R$)' ? { scale: [1, 1.2, 1] } : {}}
                       transition={{ duration: 0.3 }}
                     >
-                      <stat.icon className="w-6 h-6 text-white" />
+                      <stat.icon className="w-5 h-5 sm:w-6 sm:h-6 text-white" />
                     </motion.div>
                   </div>
-                  <div className="flex items-center mt-4">
+                  <div className="flex items-center mt-3 sm:mt-4">
                     {stat.trend === 'up' ? (
-                      <TrendingUp className="w-4 h-4 text-green-500 mr-1" />
+                      <TrendingUp className="w-3 h-3 sm:w-4 sm:h-4 text-green-500 mr-1" />
                     ) : (
-                      <TrendingDown className="w-4 h-4 text-red-500 mr-1" />
+                      <TrendingDown className="w-3 h-3 sm:w-4 sm:h-4 text-red-500 mr-1" />
                     )}
-                    <span className={`text-sm ${stat.trend === 'up' ? 'text-green-500' : 'text-red-500'}`}>
+                    <span className={`text-xs sm:text-sm ${stat.trend === 'up' ? 'text-green-500' : 'text-red-500'}`}>
                       {stat.change}
                     </span>
-                    <span className="text-gray-600 dark:text-gray-400 text-sm ml-1">este mês</span>
+                    <span className="text-gray-600 dark:text-gray-400 text-xs sm:text-sm ml-1">este mês</span>
                   </div>
                 </motion.div>
               ))}
             </motion.div>
+
+
 
             {/* Dízimos por Igreja */}
             <AnimatePresence>
@@ -1303,7 +1395,7 @@ const Dashboard: React.FC = () => {
                   exit={{ opacity: 0, y: -20, scale: 0.95 }}
                   transition={{ 
                     duration: 0.5, 
-                    delay: 0.1,
+                    delay: 0.9,
                     ease: "easeOut"
                   }}
                 >
@@ -1326,163 +1418,189 @@ const Dashboard: React.FC = () => {
                     </button>
                   )}
                 </div>
-                {(user?.role === 'admin' || user?.role === 'sede') && (
-                  <motion.div
-                    className={`bg-white dark:bg-gray-800 border border-blue-200 dark:border-blue-700/40 shadow-lg rounded-xl p-6 cursor-pointer relative overflow-hidden ${
-                      isDizimoCardClicked ? 'ring-4 ring-blue-400 ring-opacity-50' : ''
-                    }`}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ 
-                      opacity: 1, 
-                      y: 0,
-                      scale: isDizimoCardClicked ? 1.05 : 1,
-                      boxShadow: showCongregacoes 
-                        ? "0 20px 25px -5px rgba(59, 130, 246, 0.3), 0 10px 10px -5px rgba(59, 130, 246, 0.2)" 
-                        : "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)"
-                    }}
-                    transition={{ 
-                      duration: 0.6, 
-                      delay: 0.4,
-                      scale: { duration: 0.2 },
-                      boxShadow: { duration: 0.3 }
-                    }}
-                    whileHover={{ y: -5, scale: 1.02 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={() => {
-                      setIsDizimoCardClicked(true);
-                      setShowCongregacoes(!showCongregacoes);
-                      setTimeout(() => setIsDizimoCardClicked(false), 300);
-                    }}
-                  >
-                    {isDizimoCardClicked && (
-                      <motion.div
-                        className="absolute inset-0 bg-blue-400 opacity-20 rounded-xl"
-                        initial={{ scale: 0, opacity: 0.5 }}
-                        animate={{ scale: 2, opacity: 0 }}
-                        transition={{ duration: 0.6 }}
-                      />
-                    )}
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center">
+                                {(user?.role === 'admin' || user?.role === 'sede') && (
+                  <div className="space-y-6">
+                    {/* Cards das Sedes */}
+                    {dashboardData.sedes.map((sedeData, sedeIndex) => (
+                      <div key={sedeData.igreja._id}>
                         <motion.div
-                          animate={isDizimoCardClicked ? { scale: [1, 1.2, 1] } : {}}
-                          transition={{ duration: 0.3 }}
-                        >
-                          <Church className="w-8 h-8 text-blue-400 mr-3" />
-                        </motion.div>
-                        <h3 className="text-lg font-semibold text-blue-400">SEDE</h3>
-                      </div>
-                      <motion.div
-                        animate={{ rotate: showCongregacoes ? 180 : 0 }}
-                        transition={{ duration: 0.3 }}
-                        className="text-blue-400"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                        </svg>
-                      </motion.div>
-                    </div>
-                    <div className="flex flex-col md:flex-row md:justify-between items-center mt-4">
-                      <div className="text-center md:text-left mb-4 md:mb-0">
-                        <span className="block text-gray-600 dark:text-gray-400 text-sm">Sede</span>
-                        <p className="text-3xl font-bold text-gray-900 dark:text-white">{formatCurrency(dashboardData.totalSede)}</p>
-                      </div>
-                      <div className="text-center md:text-right">
-                        <span className="block text-gray-600 dark:text-gray-400 text-sm">Total Geral (Sede + Congregações)</span>
-                        <p className="text-3xl font-bold text-gray-900 dark:text-white">{formatCurrency(dashboardData.totalGeral)}</p>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-                <AnimatePresence>
-                  {showCongregacoes && (user?.role === 'admin' || user?.role === 'sede') && (
-                    <motion.div
-                      className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mt-6"
-                      initial={{ opacity: 0, height: 0, y: -20 }}
-                      animate={{ opacity: 1, height: "auto", y: 0 }}
-                      exit={{ opacity: 0, height: 0, y: -20 }}
-                      transition={{ 
-                        duration: 0.5,
-                        ease: "easeInOut",
-                        height: { duration: 0.4 }
-                      }}
-                    >
-                      {dashboardData.congregacoes.map((igrejaData, index) => (
-                        <motion.div
-                          key={igrejaData.igreja._id}
-                          className="bg-gray-100 dark:bg-gray-700 rounded-lg p-4"
-                          initial={{ opacity: 0, y: 30, scale: 0.9 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          className={`bg-white dark:bg-gray-800 border border-blue-200 dark:border-blue-700/40 shadow-lg rounded-xl p-6 cursor-pointer relative overflow-hidden ${
+                            sedeComAnimacao === sedeData.igreja._id ? 'ring-4 ring-blue-400 ring-opacity-50' : ''
+                          }`}
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ 
+                            opacity: 1, 
+                            y: 0,
+                            scale: sedeComAnimacao === sedeData.igreja._id ? 1.05 : 1,
+                            boxShadow: sedeExpandida === sedeData.igreja._id
+                              ? "0 20px 25px -5px rgba(59, 130, 246, 0.3), 0 10px 10px -5px rgba(59, 130, 246, 0.2)" 
+                              : "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)"
+                          }}
                           transition={{ 
-                            duration: 0.5, 
-                            delay: 0.2 + index * 0.1,
-                            ease: "easeOut"
+                            duration: 0.6, 
+                            delay: 0.4 + sedeIndex * 0.1,
+                            scale: { duration: 0.2 },
+                            boxShadow: { duration: 0.3 }
                           }}
                           whileHover={{ y: -5, scale: 1.02 }}
-                          whileTap={{ scale: 0.98 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={() => {
+                            setSedeComAnimacao(sedeData.igreja._id);
+                            const isCurrentlyExpanded = sedeExpandida === sedeData.igreja._id;
+                            setSedeExpandida(isCurrentlyExpanded ? null : sedeData.igreja._id);
+                            setTimeout(() => setSedeComAnimacao(null), 300);
+                          }}
                         >
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="flex items-center gap-2">
+                          {sedeComAnimacao === sedeData.igreja._id && (
+                            <motion.div
+                              className="absolute inset-0 bg-blue-400 opacity-20 rounded-xl"
+                              initial={{ scale: 0, opacity: 0.5 }}
+                              animate={{ scale: 2, opacity: 0 }}
+                              transition={{ duration: 0.6 }}
+                            />
+                          )}
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center">
                               <motion.div
-                                initial={{ scale: 0 }}
-                                animate={{ scale: 1 }}
-                                transition={{ 
-                                  duration: 0.3, 
-                                  delay: 0.3 + index * 0.1,
-                                  type: "spring",
-                                  stiffness: 200
-                                }}
+                                animate={sedeComAnimacao === sedeData.igreja._id ? { scale: [1, 1.2, 1] } : {}}
+                                transition={{ duration: 0.3 }}
                               >
-                                <Church className="w-4 h-4 text-green-400" />
+                                <Church className="w-8 h-8 text-blue-400 mr-3" />
                               </motion.div>
-                              <h4 className="text-gray-900 dark:text-white font-medium text-sm">{igrejaData.igreja?.nome || 'Igreja'}</h4>
+                              <div>
+                                <h3 className="text-lg font-semibold text-blue-400">{sedeData.igreja.nome}</h3>
+                                <span className="text-sm text-gray-600 dark:text-gray-400">Igreja Sede</span>
+                              </div>
                             </div>
-                            <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-500 text-white">
-                              Congregação
-                            </span>
+                            <motion.div
+                              animate={{ rotate: sedeExpandida === sedeData.igreja._id ? 180 : 0 }}
+                              transition={{ duration: 0.3 }}
+                              className="text-blue-400"
+                            >
+                              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                              </svg>
+                            </motion.div>
                           </div>
-                          <div className="text-center">
-                            <motion.p 
-                              className="text-2xl font-bold text-green-400"
-                              initial={{ opacity: 0, y: 10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              transition={{ 
-                                duration: 0.4, 
-                                delay: 0.4 + index * 0.1 
-                              }}
-                            >
-                              R$ {igrejaData.total.toFixed(2)}
-                            </motion.p>
-                            <motion.p 
-                              className="text-gray-600 dark:text-gray-400 text-sm"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                              transition={{ 
-                                duration: 0.4, 
-                                delay: 0.5 + index * 0.1 
-                              }}
-                            >
-                              {igrejaData.items.length} registro{igrejaData.items.length !== 1 ? 's' : ''}
-                            </motion.p>
+                          <div className="flex flex-col md:flex-row md:justify-between items-center mt-4">
+                            <div className="text-center md:text-left mb-4 md:mb-0">
+                              <span className="block text-gray-600 dark:text-gray-400 text-sm">Valor desta Sede</span>
+                              <p className="text-3xl font-bold text-gray-900 dark:text-white">{formatCurrency(sedeData.total)}</p>
+                            </div>
+                            <div className="text-center md:text-right">
+                              <span className="block text-gray-600 dark:text-gray-400 text-sm">Total desta Sede + suas Congregações</span>
+                              <p className="text-3xl font-bold text-gray-900 dark:text-white">{formatCurrency(sedeData.total + dashboardData.congregacoes
+                                .filter(cong => {
+                                  const sedeId = typeof cong.igreja.sede === 'string' ? cong.igreja.sede : cong.igreja.sede?._id;
+                                  return sedeId === sedeData.igreja._id;
+                                })
+                                .reduce((sum, cong) => sum + cong.total, 0))}</p>
+                            </div>
                           </div>
                         </motion.div>
-                      ))}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
+                        
+                        {/* Congregações desta sede específica */}
+                        <AnimatePresence>
+                          {sedeExpandida === sedeData.igreja._id && (
+                            <motion.div
+                              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4 ml-4"
+                              initial={{ opacity: 0, height: 0, y: -20 }}
+                              animate={{ opacity: 1, height: "auto", y: 0 }}
+                              exit={{ opacity: 0, height: 0, y: -20 }}
+                              transition={{ 
+                                duration: 0.5,
+                                ease: "easeInOut",
+                                height: { duration: 0.4 }
+                              }}
+                            >
+                              {dashboardData.congregacoes
+                                .filter(congregacao => {
+                                  const sedeId = typeof congregacao.igreja.sede === 'string' ? congregacao.igreja.sede : congregacao.igreja.sede?._id;
+                                  return sedeId === sedeData.igreja._id;
+                                })
+                                .map((congregacaoData, congregacaoIndex) => (
+                                <motion.div
+                                  key={congregacaoData.igreja._id}
+                                  className="bg-gray-100 dark:bg-gray-700 rounded-lg p-4 border-l-4 border-green-400"
+                                  initial={{ opacity: 0, y: 30, scale: 0.9 }}
+                                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                                  transition={{ 
+                                    duration: 0.5, 
+                                    delay: 0.1 + congregacaoIndex * 0.1,
+                                    ease: "easeOut"
+                                  }}
+                                  whileHover={{ y: -3, scale: 1.02 }}
+                                  whileTap={{ scale: 0.98 }}
+                                >
+                                  <div className="flex items-center justify-between mb-3">
+                                    <div className="flex items-center gap-2">
+                                      <motion.div
+                                        initial={{ scale: 0 }}
+                                        animate={{ scale: 1 }}
+                                        transition={{ 
+                                          duration: 0.3, 
+                                          delay: 0.2 + congregacaoIndex * 0.1,
+                                          type: "spring",
+                                          stiffness: 200
+                                        }}
+                                      >
+                                        <Church className="w-4 h-4 text-green-400" />
+                                      </motion.div>
+                                      <h5 className="text-gray-900 dark:text-white font-medium text-sm">{congregacaoData.igreja?.nome || 'Congregação'}</h5>
+                                    </div>
+                                    <span className="px-2 py-1 rounded-full text-xs font-bold bg-green-500 text-white">
+                                      Congregação
+                                    </span>
+                                  </div>
+                                  <div className="text-center">
+                                    <motion.p 
+                                      className="text-2xl font-bold text-green-400"
+                                      initial={{ opacity: 0, y: 10 }}
+                                      animate={{ opacity: 1, y: 0 }}
+                                      transition={{ 
+                                        duration: 0.4, 
+                                        delay: 0.3 + congregacaoIndex * 0.1 
+                                      }}
+                                    >
+                                      R$ {congregacaoData.total.toFixed(2)}
+                                    </motion.p>
+                                    <motion.p 
+                                      className="text-gray-600 dark:text-gray-400 text-sm"
+                                      initial={{ opacity: 0 }}
+                                      animate={{ opacity: 1 }}
+                                      transition={{ 
+                                        duration: 0.4, 
+                                        delay: 0.4 + congregacaoIndex * 0.1 
+                                      }}
+                                    >
+                                      {congregacaoData.items.length} registro{congregacaoData.items.length !== 1 ? 's' : ''}
+                                    </motion.p>
+                                  </div>
+                                </motion.div>
+                              ))}
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    ))}
+                     
+
+                  </div>
+                )}
+
               </motion.div>
             )}
             </AnimatePresence>
 
-            {/* Main Content */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                        {/* Main Content */}
+            <div className="grid grid-cols-1 lg:grid-cols-7 gap-8 mb-32">
               {/* Recent Activities */}
               <motion.div
-                className="lg:col-span-2 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg"
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.6, delay: 0.5 }}
-              >
+                className="lg:col-span-4 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg mb-16"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ duration: 0.6, delay: 1.0 }}
+            >
                 <div className="flex items-center justify-between mb-6">
                   <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
                     {user?.role === 'admin' 
@@ -1525,15 +1643,15 @@ const Dashboard: React.FC = () => {
 
               {/* Upcoming Events */}
               <motion.div
-                className="bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg"
+                className="lg:col-span-3 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg mb-16"
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.6, delay: 0.6 }}
+                transition={{ duration: 0.6, delay: 1.1 }}
               >
                 <div className="flex items-center justify-between mb-6">
                   <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
                     {user?.role === 'admin' 
-                      ? 'Próximos Eventos' 
+                      ? 'Próximos Eventos por Sede' 
                       : user?.role === 'sede' 
                         ? 'Eventos das Congregações' 
                         : 'Eventos da Igreja'
@@ -1547,99 +1665,218 @@ const Dashboard: React.FC = () => {
                   </button>
                 </div>
                 
-                <div className="space-y-4">
-                  {dashboardData.eventosProximos.length > 0 ? (
-                    dashboardData.eventosProximos.map((event, index) => (
-                      <motion.div
-                        key={event._id}
-                        className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg"
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.6, delay: 0.5 + index * 0.1 }}
-                      >
-                        <div className="flex items-center space-x-3">
-                          <div className={`w-3 h-3 rounded-full ${getEventColor(event.tipo)}`}></div>
-                          <div className="flex-1">
-                            <div className="flex items-center justify-between mb-1">
-                              <p className="text-gray-900 dark:text-white font-medium">{event.titulo}</p>
-                              {/* Tag para identificar se é evento da sede ou congregação */}
-                              {event.igreja && (
-                                <span className={`px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${
-                                  event.igreja.tipo === 'sede' 
-                                    ? 'bg-blue-500 text-white' 
-                                    : 'bg-green-500 text-white'
-                                }`}>
-                                  {event.igreja.tipo === 'sede' ? (
-                                    <>
-                                      <Church className="w-3 h-3" />
-                                      Sede
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Church className="w-3 h-3" />
-                                      {event.igreja.nome}
-                                    </>
-                                  )}
-                                </span>
-                              )}
+                {user?.role === 'admin' ? (
+                  <div className="space-y-4">
+                    {/* Cards das Sedes para Eventos */}
+                    {dashboardData.sedes.map((sedeData, sedeIndex) => {
+                      // Filtrar eventos desta sede + suas congregações
+                      const eventosDestaSede = dashboardData.eventosProximos.filter(event => {
+                        if (event.igreja?.tipo === 'sede' && event.igreja._id === sedeData.igreja._id) {
+                          return true; // Evento da própria sede
+                        }
+                        if (event.igreja?.tipo === 'congregacao') {
+                          const sedeId = typeof event.igreja.sede === 'string' ? event.igreja.sede : event.igreja.sede?._id;
+                          return sedeId === sedeData.igreja._id; // Evento de congregação desta sede
+                        }
+                        return false;
+                      });
+
+                      return (
+                        <div key={sedeData.igreja._id}>
+                          <motion.div
+                            className={`bg-white dark:bg-gray-800 border border-purple-200 dark:border-purple-700/40 shadow-lg rounded-xl p-4 cursor-pointer relative overflow-hidden`}
+                            initial={{ opacity: 0, y: 20 }}
+                            animate={{ 
+                              opacity: 1, 
+                              y: 0,
+                              boxShadow: sedeEventosExpandida === sedeData.igreja._id
+                                ? "0 20px 25px -5px rgba(147, 51, 234, 0.3), 0 10px 10px -5px rgba(147, 51, 234, 0.2)" 
+                                : "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)"
+                            }}
+                            transition={{ 
+                              duration: 0.6, 
+                              delay: 0.3 + sedeIndex * 0.1,
+                              boxShadow: { duration: 0.3 }
+                            }}
+                            whileHover={{ y: -3, scale: 1.02 }}
+                            whileTap={{ scale: 0.98 }}
+                            onClick={() => {
+                              const isCurrentlyExpanded = sedeEventosExpandida === sedeData.igreja._id;
+                              setSedeEventosExpandida(isCurrentlyExpanded ? null : sedeData.igreja._id);
+                            }}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center">
+                                <Calendar className="w-6 h-6 text-purple-500 mr-3" />
+                                <div>
+                                  <h4 className="text-lg font-semibold text-purple-600 dark:text-purple-400">{sedeData.igreja.nome}</h4>
+                                  <span className="text-sm text-gray-600 dark:text-gray-400">{eventosDestaSede.length} evento{eventosDestaSede.length !== 1 ? 's' : ''} próximo{eventosDestaSede.length !== 1 ? 's' : ''}</span>
+                                </div>
+                              </div>
+                              <motion.div
+                                animate={{ rotate: sedeEventosExpandida === sedeData.igreja._id ? 180 : 0 }}
+                                transition={{ duration: 0.3 }}
+                                className="text-purple-500"
+                              >
+                                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                </svg>
+                              </motion.div>
                             </div>
-                            <p className="text-gray-600 dark:text-gray-400 text-sm">{formatDate(event.data)} às {formatTime(event.data)}</p>
-                            <p className="text-gray-600 dark:text-gray-500 text-xs">{event.igreja?.nome || 'Sistema'}</p>
-                          </div>
+                          </motion.div>
+                          
+                          {/* Eventos desta sede específica */}
+                          <AnimatePresence>
+                            {sedeEventosExpandida === sedeData.igreja._id && (
+                              <motion.div
+                                className="space-y-3 mt-3 ml-4"
+                                initial={{ opacity: 0, height: 0, y: -20 }}
+                                animate={{ opacity: 1, height: "auto", y: 0 }}
+                                exit={{ opacity: 0, height: 0, y: -20 }}
+                                transition={{ 
+                                  duration: 0.5,
+                                  ease: "easeInOut",
+                                  height: { duration: 0.4 }
+                                }}
+                              >
+                                {eventosDestaSede.length > 0 ? (
+                                  eventosDestaSede.map((event, eventIndex) => (
+                                    <motion.div
+                                      key={event._id}
+                                      className="p-3 bg-gray-100 dark:bg-gray-700 rounded-lg border-l-4 border-purple-400"
+                                      initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                                      transition={{ 
+                                        duration: 0.4, 
+                                        delay: eventIndex * 0.1,
+                                        ease: "easeOut"
+                                      }}
+                                    >
+                                      <div className="flex items-center space-x-3">
+                                        <div className={`w-3 h-3 rounded-full ${getEventColor(event.tipo)}`}></div>
+                                        <div className="flex-1">
+                                          <div className="flex items-center justify-between mb-1">
+                                            <p className="text-gray-900 dark:text-white font-medium text-sm">{event.titulo}</p>
+                                            {/* Tag para identificar se é evento da sede ou congregação */}
+                                            {event.igreja && (
+                                              <span className={`px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${
+                                                event.igreja.tipo === 'sede' 
+                                                  ? 'bg-blue-500 text-white' 
+                                                  : 'bg-green-500 text-white'
+                                              }`}>
+                                                {event.igreja.tipo === 'sede' ? (
+                                                  <>
+                                                    <Church className="w-3 h-3" />
+                                                    Sede
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <Church className="w-3 h-3" />
+                                                    {event.igreja.nome}
+                                                  </>
+                                                )}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <p className="text-gray-600 dark:text-gray-400 text-xs">{formatDate(event.data)} às {formatTime(event.data)}</p>
+                                          <p className="text-gray-600 dark:text-gray-500 text-xs">{event.igreja?.nome || 'Sistema'}</p>
+                                        </div>
+                                      </div>
+                                    </motion.div>
+                                  ))
+                                ) : (
+                                  <div className="text-center py-6">
+                                    <Calendar className="w-8 h-8 text-gray-500 mx-auto mb-2" />
+                                    <p className="text-gray-600 dark:text-gray-400 text-sm">Nenhum evento próximo para esta sede</p>
+                                  </div>
+                                )}
+                              </motion.div>
+                            )}
+                          </AnimatePresence>
                         </div>
-                      </motion.div>
-                    ))
-                  ) : (
-                    <div className="text-center py-8">
-                      <Calendar className="w-12 h-12 text-gray-500 mx-auto mb-2" />
-                      <p className="text-gray-600 dark:text-gray-400 text-sm">Nenhum evento próximo</p>
-                    </div>
-                  )}
-                </div>
+                      );
+                    })}
+                    
+                    {dashboardData.sedes.length === 0 && (
+                      <div className="text-center py-8">
+                        <Calendar className="w-12 h-12 text-gray-500 mx-auto mb-2" />
+                        <p className="text-gray-600 dark:text-gray-400 text-sm">Nenhuma sede encontrada</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {dashboardData.eventosProximos.length > 0 ? (
+                      dashboardData.eventosProximos.map((event, index) => (
+                        <motion.div
+                          key={event._id}
+                          className="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg"
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ duration: 0.6, delay: 0.5 + index * 0.1 }}
+                        >
+                          <div className="flex items-center space-x-3">
+                            <div className={`w-3 h-3 rounded-full ${getEventColor(event.tipo)}`}></div>
+                            <div className="flex-1">
+                              <div className="flex items-center justify-between mb-1">
+                                <p className="text-gray-900 dark:text-white font-medium">{event.titulo}</p>
+                                {/* Tag para identificar se é evento da sede ou congregação */}
+                                {event.igreja && (
+                                  <span className={`px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${
+                                    event.igreja.tipo === 'sede' 
+                                      ? 'bg-blue-500 text-white' 
+                                      : 'bg-green-500 text-white'
+                                  }`}>
+                                    {event.igreja.tipo === 'sede' ? (
+                                      <>
+                                        <Church className="w-3 h-3" />
+                                        Sede
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Church className="w-3 h-3" />
+                                        {event.igreja.nome}
+                                      </>
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-gray-600 dark:text-gray-400 text-sm">{formatDate(event.data)} às {formatTime(event.data)}</p>
+                              <p className="text-gray-600 dark:text-gray-500 text-xs">{event.igreja?.nome || 'Sistema'}</p>
+                            </div>
+                          </div>
+                        </motion.div>
+                      ))
+                    ) : (
+                      <div className="text-center py-8">
+                        <Calendar className="w-12 h-12 text-gray-500 mx-auto mb-2" />
+                        <p className="text-gray-600 dark:text-gray-400 text-sm">Nenhum evento próximo</p>
+                      </div>
+                    )}
+                  </div>
+                )}
               </motion.div>
             </div>
+            
+            {/* Margem extra para garantir que nada seja cortado */}
+            <div className="h-32"></div>
 
-            {/* Quick Actions */}
-            <motion.div
-              className="mt-8 mb-24 lg:mb-8 bg-gradient-to-br from-white to-gray-50 dark:from-gray-800 dark:to-gray-900 border border-gray-200 dark:border-blue-500/20 rounded-xl p-6 shadow-lg"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.8 }}
-            >
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-6">Ações Rápidas</h3>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    {/* Só mostra as ações de membro e dízimo se não for admin */}
-                    {[
-                      { title: 'Gerenciar Igrejas', icon: Church, color: 'from-blue-500 to-blue-700', action: 'igreja', show: user?.role === 'admin' || user?.role === 'sede' },
-                      { title: 'Criar Evento', icon: Calendar, color: 'from-green-500 to-green-700', action: 'evento', show: true },
-                      { title: 'Registrar Dízimo', icon: DollarSign, color: 'from-yellow-500 to-yellow-700', action: 'dizimo', show: user?.role !== 'admin' },
-                      { title: 'Adicionar Membro', icon: Users, color: 'from-purple-500 to-purple-700', action: 'membro', show: user?.role !== 'admin' },
-                      { title: 'Relatório Dizimistas', icon: FileText, color: 'from-orange-500 to-orange-700', action: 'relatorio-dizimistas', show: user?.role === 'admin' || user?.role === 'sede' }
-                    ].filter(a => a.show).map((action, index) => (
-                  <motion.button
-                    key={action.title}
-                    onClick={() => handleQuickAction(action.action)}
-                    className={`bg-gradient-to-r ${action.color} text-white p-4 rounded-lg hover:scale-105 transition-all duration-300 flex flex-col items-center space-y-2`}
-                    initial={{ opacity: 0, scale: 0.8 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    transition={{ duration: 0.6, delay: 0.6 + index * 0.1 }}
-                    whileHover={{ y: -5 }}
-                  >
-                    <action.icon className="w-6 h-6" />
-                    <span className="text-sm font-medium">{action.title}</span>
-                  </motion.button>
-                ))}
-              </div>
-            </motion.div>
+
           </div>
           
-          {/* Cards laterais - Apenas para usuários não-admin e desktop */}
+          {/* DiretoriaCard na lateral direita - Apenas para telas 2xl+ */}
           {user?.role !== 'admin' && (
-            <div className="hidden lg:flex flex-col justify-center items-center flex-shrink-0 mt-8 lg:mt-0 w-full lg:w-64 lg:h-auto">
+            <div className="hidden 2xl:flex flex-col justify-start items-center flex-shrink-0 w-56 pb-8">
               <DiretoriaCard />
             </div>
           )}
         </div>
+
+        {/* Espaçamento final para garantir scroll adequado */}
+        <div className="h-40 lg:h-32 dashboard-final-spacing"></div>
+        
+        {/* Espaçamento extra de segurança */}
+        <div style={{ height: '100px', marginBottom: '50px' }}></div>
       </div>
 
       {/* Mobile Navigation */}
@@ -1786,6 +2023,9 @@ const Dashboard: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+      
+      {/* Espaçamento Final Extra - GARANTIA ABSOLUTA */}
+      <div className="h-40 lg:h-48 xl:h-56 w-full flex-shrink-0 pb-20 mb-20"></div>
     </div>
   );
 };

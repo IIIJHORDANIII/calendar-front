@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Edit, Save, X, Phone, Mail, MessageCircle, Loader } from 'lucide-react';
+import { useApi } from '../utils/api';
 
 interface PastorData {
   nome: string;
@@ -20,7 +21,7 @@ interface DuploPastorData {
 const PastorCardIndividual = React.memo(({ 
   pastor, 
   titulo, 
-  podeEditar = false,
+  userIgrejaTipo,
   onEditStart,
   isEditing,
   onSave,
@@ -30,11 +31,12 @@ const PastorCardIndividual = React.memo(({
   onInputChange,
   onPhotoChange,
   isCongregacao,
-  editingPastorData
+  editingPastorData,
+  isCardCongregacao = false
 }: { 
   pastor: PastorData; 
   titulo: string; 
-  podeEditar?: boolean;
+  userIgrejaTipo: string;
   onEditStart?: () => void;
   isEditing: boolean;
   onSave: () => void;
@@ -45,7 +47,18 @@ const PastorCardIndividual = React.memo(({
   onPhotoChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
   isCongregacao: boolean;
   editingPastorData: PastorData;
+  isCardCongregacao?: boolean;
 }) => {
+  // Determinar se este card pode ser editado pelo usuário atual
+  const podeEditarEsteCard = () => {
+    // Sedes/admin podem editar qualquer card
+    if (userIgrejaTipo !== 'congregacao') {
+      return true;
+    }
+    // Congregações só podem editar o card do pastor da congregação
+    return isCardCongregacao;
+  };
+
   const openWhatsApp = (telefone: string) => {
     const phoneNumber = telefone.replace(/\D/g, '');
     const message = 'Olá Pastor! Gostaria de conversar com o senhor.';
@@ -69,7 +82,7 @@ const PastorCardIndividual = React.memo(({
       {/* Header com botão de editar */}
       <div className="w-full flex justify-between items-center mb-6">
         <h2 className="text-xl font-bold text-gray-900 dark:text-white">{titulo}</h2>
-        {podeEditar && !isEditing ? (
+        {!isEditing && podeEditarEsteCard() ? (
           <button
             onClick={onEditStart}
             className="text-blue-400 hover:text-blue-300 transition-colors p-2 rounded-lg hover:bg-blue-500/10"
@@ -77,7 +90,7 @@ const PastorCardIndividual = React.memo(({
           >
             <Edit className="w-4 h-4" />
           </button>
-        ) : podeEditar && isEditing ? (
+        ) : isEditing ? (
           <div className="flex space-x-1">
             <button
               onClick={onSave}
@@ -114,7 +127,7 @@ const PastorCardIndividual = React.memo(({
             alt="Pastor"
             className="w-28 h-28 rounded-full border-4 border-blue-500 shadow-lg object-cover"
           />
-          {podeEditar && isEditing && (
+          {isEditing && podeEditarEsteCard() && (
             <label className="absolute -bottom-1 -right-1 bg-blue-500 hover:bg-blue-600 text-white rounded-full p-2 cursor-pointer transition-colors shadow-lg">
               <input
                 type="file"
@@ -130,20 +143,20 @@ const PastorCardIndividual = React.memo(({
 
       {/* Informações do Pastor */}
       <div className="space-y-4">
-        {isEditing && podeEditar ? (
+        {isEditing ? (
           // Modo de edição
           <div className="space-y-4">
             <div className="space-y-3">
               <input
                 type="text"
-                value={isCongregacao ? editingPastorData.nome : pastor.nome}
+                value={editingPastorData.nome}
                 onChange={(e) => onInputChange('nome', e.target.value)}
                 className="w-full bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-gray-900 dark:text-white text-center font-bold text-lg"
                 placeholder="Nome do Pastor"
               />
               <input
                 type="text"
-                value={isCongregacao ? editingPastorData.cargo : pastor.cargo}
+                value={editingPastorData.cargo}
                 onChange={(e) => onInputChange('cargo', e.target.value)}
                 className="w-full bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-blue-500 dark:text-blue-400 text-center text-sm"
                 placeholder="Cargo"
@@ -151,7 +164,7 @@ const PastorCardIndividual = React.memo(({
             </div>
             
             <textarea
-              value={isCongregacao ? editingPastorData.frase : pastor.frase}
+              value={editingPastorData.frase}
               onChange={(e) => onInputChange('frase', e.target.value)}
               className="w-full bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-gray-600 dark:text-gray-300 text-center text-sm italic resize-none"
               placeholder="Frase inspiradora"
@@ -161,14 +174,14 @@ const PastorCardIndividual = React.memo(({
             <div className="space-y-3">
               <input
                 type="email"
-                value={isCongregacao ? editingPastorData.email : pastor.email}
+                value={editingPastorData.email}
                 onChange={(e) => onInputChange('email', e.target.value)}
                 className="w-full bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-gray-600 dark:text-gray-400 text-sm"
                 placeholder="Email"
               />
               <input
                 type="tel"
-                value={isCongregacao ? editingPastorData.telefone : pastor.telefone}
+                value={editingPastorData.telefone}
                 onChange={(e) => onInputChange('telefone', e.target.value)}
                 className="w-full bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-gray-600 dark:text-gray-400 text-sm"
                 placeholder="Telefone"
@@ -176,7 +189,7 @@ const PastorCardIndividual = React.memo(({
             </div>
             
             <textarea
-              value={isCongregacao ? editingPastorData.biografia : pastor.biografia}
+              value={editingPastorData.biografia}
               onChange={(e) => onInputChange('biografia', e.target.value)}
               className="w-full bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 text-gray-600 dark:text-gray-300 text-sm resize-none"
               placeholder="Biografia"
@@ -242,11 +255,13 @@ const PastorCardIndividual = React.memo(({
 PastorCardIndividual.displayName = 'PastorCardIndividual';
 
 const PastorCard: React.FC = () => {
+  const api = useApi();
   const [isEditing, setIsEditing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [isCongregacao, setIsCongregacao] = useState(false);
+  const [userIgrejaTipo, setUserIgrejaTipo] = useState<string>('');
   const [pastorData, setPastorData] = useState<PastorData>({
     nome: '',
     cargo: 'Pastor Presidente',
@@ -271,7 +286,7 @@ const PastorCard: React.FC = () => {
   });
 
   // Buscar dados do pastor da igreja
-  const fetchPastorData = async () => {
+  const fetchPastorData = useCallback(async () => {
     try {
       const user = JSON.parse(localStorage.getItem('user') || '{}');
       const token = localStorage.getItem('token');
@@ -281,14 +296,19 @@ const PastorCard: React.FC = () => {
         return;
       }
 
+      // Buscar informações da igreja para verificar o tipo
+      const igrejaResponse = await api.get(`/igrejas/${user.igreja}`);
+      if (igrejaResponse.ok) {
+        const igrejaData = await igrejaResponse.json();
+        setUserIgrejaTipo(igrejaData.tipo || '');
+      } else {
+        console.log('Erro ao buscar dados da igreja:', igrejaResponse.status);
+      }
+
       // Verificar se é congregação e buscar dados duplos
       if (user.role === 'congregacao') {
         setIsCongregacao(true);
-        const response = await fetch(`http://localhost:3005/pastor/duplo/${user.igreja}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
+        const response = await api.get(`/pastor/duplo/${user.igreja}`);
 
         if (response.ok) {
           const data = await response.json();
@@ -318,13 +338,10 @@ const PastorCard: React.FC = () => {
           // Inicializar também o editingPastorData
           setEditingPastorData({...congregacaoData});
         }
-      } else {
+      } else if (user.role === 'sede' || user.role === 'admin') {
         // Para sede ou admin, usar a rota normal
-        const response = await fetch(`http://localhost:3005/pastor/${user.igreja}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        });
+        setIsCongregacao(false);
+        const response = await api.get(`/pastor/${user.igreja}`);
 
         if (response.ok) {
           const data = await response.json();
@@ -337,18 +354,20 @@ const PastorCard: React.FC = () => {
             biografia: data.biografia || '',
             frase: data.frase || ''
           });
-                  } else if (response.status === 404) {
-            // Pastor não encontrado, usar dados padrão
-            setPastorData({
-              nome: '',
-              cargo: 'Pastor Presidente',
-              foto: 'https://randomuser.me/api/portraits/men/32.jpg',
-              telefone: '',
-              email: '',
-              biografia: '',
-              frase: ''
-            });
+        } else if (response.status === 404) {
+          // Pastor não encontrado, usar dados padrão
+          setPastorData({
+            nome: '',
+            cargo: 'Pastor Presidente',
+            foto: 'https://randomuser.me/api/portraits/men/32.jpg',
+            telefone: '',
+            email: '',
+            biografia: '',
+            frase: ''
+          });
         }
+      } else {
+        console.warn('PastorCard - Role não reconhecido:', user.role);
       }
     } catch (error) {
       console.error('Erro ao carregar dados do pastor:', error);
@@ -356,11 +375,11 @@ const PastorCard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [api]);
 
   useEffect(() => {
     fetchPastorData();
-  }, []);
+  }, [fetchPastorData]);
 
   const handleSave = useCallback(async () => {
     try {
@@ -375,7 +394,7 @@ const PastorCard: React.FC = () => {
         return;
       }
 
-      const dadosParaSalvar = isCongregacao ? editingPastorData : pastorData;
+      const dadosParaSalvar = editingPastorData;
 
       const formData = new FormData();
       formData.append('nome', dadosParaSalvar.nome);
@@ -395,12 +414,10 @@ const PastorCard: React.FC = () => {
         formData.append('foto', file);
       }
 
-      const response = await fetch('http://localhost:3005/pastor', {
+      const response = await api.request('/pastor', {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        },
-        body: formData
+        body: formData,
+        headers: {} // Remove Content-Type header for FormData
       });
 
       if (response.ok) {
@@ -419,10 +436,11 @@ const PastorCard: React.FC = () => {
             }
           }));
         } else {
-          setPastorData(prev => ({
-            ...prev,
-            foto: savedData.foto || prev.foto
-          }));
+          // Para sede/admin, atualizar pastorData com dados salvos
+          setPastorData({
+            ...savedData,
+            foto: savedData.foto || editingPastorData.foto
+          });
         }
         setIsEditing(false);
         console.log('Dados do pastor salvos com sucesso');
@@ -436,7 +454,7 @@ const PastorCard: React.FC = () => {
     } finally {
       setSaving(false);
     }
-  }, [isCongregacao, editingPastorData, pastorData]);
+  }, [api, isCongregacao, editingPastorData]);
 
   const handleCancel = useCallback(() => {
     if (isCongregacao) {
@@ -450,46 +468,43 @@ const PastorCard: React.FC = () => {
         biografia: '',
         frase: ''
       })});
+    } else {
+      // Para sede/admin, restaurar dados originais
+      setEditingPastorData({...pastorData});
     }
     setIsEditing(false);
     setError('');
-  }, [isCongregacao, duploPastorData.congregacao]);
+  }, [isCongregacao, duploPastorData.congregacao, pastorData]);
 
   const handleEditStart = useCallback(() => {
     if (isCongregacao && duploPastorData.congregacao) {
       setEditingPastorData({...duploPastorData.congregacao});
+    } else if (!isCongregacao) {
+      // Para sede/admin, inicializar editingPastorData com dados atuais
+      setEditingPastorData({...pastorData});
     }
     setIsEditing(true);
-  }, [isCongregacao, duploPastorData.congregacao]);
+  }, [isCongregacao, duploPastorData.congregacao, pastorData]);
 
   const handlePhotoChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = (e) => {
-        if (isCongregacao) {
-          setEditingPastorData(prev => ({
-            ...prev,
-            foto: e.target?.result as string
-          }));
-        } else {
-          setPastorData(prev => ({
-            ...prev,
-            foto: e.target?.result as string
-          }));
-        }
+        // Sempre atualizar editingPastorData durante a edição
+        setEditingPastorData(prev => ({
+          ...prev,
+          foto: e.target?.result as string
+        }));
       };
       reader.readAsDataURL(file);
     }
-  }, [isCongregacao]);
+  }, []);
 
   const handleInputChange = useCallback((field: keyof PastorData, value: string) => {
-    if (isCongregacao) {
-      setEditingPastorData(prev => ({ ...prev, [field]: value }));
-    } else {
-      setPastorData(prev => ({ ...prev, [field]: value }));
-    }
-  }, [isCongregacao]);
+    // Sempre atualizar editingPastorData durante a edição
+    setEditingPastorData(prev => ({ ...prev, [field]: value }));
+  }, []);
 
   if (loading) {
     return (
@@ -510,7 +525,7 @@ const PastorCard: React.FC = () => {
           <PastorCardIndividual 
             pastor={duploPastorData.matriz} 
             titulo="Pastor Presidente" 
-            podeEditar={false}
+            userIgrejaTipo={userIgrejaTipo}
             isEditing={false}
             onSave={handleSave}
             onCancel={handleCancel}
@@ -520,6 +535,7 @@ const PastorCard: React.FC = () => {
             onPhotoChange={handlePhotoChange}
             isCongregacao={isCongregacao}
             editingPastorData={editingPastorData}
+            isCardCongregacao={false}
           />
         )}
         
@@ -528,7 +544,7 @@ const PastorCard: React.FC = () => {
           <PastorCardIndividual 
             pastor={duploPastorData.congregacao} 
             titulo="Pastor da Congregação" 
-            podeEditar={true}
+            userIgrejaTipo={userIgrejaTipo}
             onEditStart={handleEditStart}
             isEditing={isEditing}
             onSave={handleSave}
@@ -539,6 +555,7 @@ const PastorCard: React.FC = () => {
             onPhotoChange={handlePhotoChange}
             isCongregacao={isCongregacao}
             editingPastorData={editingPastorData}
+            isCardCongregacao={true}
           />
         )}
       </div>
@@ -550,7 +567,8 @@ const PastorCard: React.FC = () => {
     <PastorCardIndividual 
       pastor={pastorData} 
       titulo="Pastor" 
-      podeEditar={true}
+      userIgrejaTipo={userIgrejaTipo}
+      onEditStart={handleEditStart}
       isEditing={isEditing}
       onSave={handleSave}
       onCancel={handleCancel}
@@ -560,6 +578,7 @@ const PastorCard: React.FC = () => {
       onPhotoChange={handlePhotoChange}
       isCongregacao={isCongregacao}
       editingPastorData={editingPastorData}
+      isCardCongregacao={false}
     />
   );
 };

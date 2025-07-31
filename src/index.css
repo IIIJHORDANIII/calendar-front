@@ -2,6 +2,35 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Garantir espaçamento adequado */
+html, body {
+  overflow-x: hidden;
+}
+
+body {
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: max(env(safe-area-inset-bottom), 20px);
+}
+
+/* Scroll suave */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Garantir que containers principais tenham espaçamento */
+.dashboard-container {
+  padding-bottom: 8rem !important;
+  margin-bottom: 4rem !important;
+  min-height: calc(100vh - 2rem) !important;
+}
+
+/* Forçar espaçamento final em todos os casos */
+.dashboard-final-spacing {
+  height: 80px !important;
+  margin-bottom: 40px !important;
+  display: block !important;
+}
+
 /* Scrollbar customizada */
 ::-webkit-scrollbar {
   width: 10px;

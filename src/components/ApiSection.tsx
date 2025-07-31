@@ -163,13 +163,13 @@ const ApiSection: React.FC = () => {
           </h3>
           <div className="flex items-center gap-4">
             <code className="bg-gray-100 dark:bg-gray-700 px-4 py-2 rounded-lg text-blue-500 font-mono border border-blue-500">
-              http://localhost:3001
+              http://localhost:3005
             </code>
             <button
-              onClick={() => copyToClipboard('http://localhost:3001')}
+              onClick={() => copyToClipboard('http://localhost:3005')}
               className="inline-flex items-center justify-center px-7 py-3.5 rounded-xl font-semibold text-base transition-all duration-300 cursor-pointer border-none relative overflow-hidden bg-gradient-to-br from-blue-500 to-blue-700 text-white shadow-lg shadow-blue-500/30"
             >
-              {copiedEndpoint === 'http://localhost:3001' ? (
+              {copiedEndpoint === 'http://localhost:3005' ? (
                 <Check className="w-4 h-4" />
               ) : (
                 <Copy className="w-4 h-4" />
